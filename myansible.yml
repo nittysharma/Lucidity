@@ -1,0 +1,52 @@
+---
+- name: Capture Disk Utilization of EC2 Instances
+  hosts: localhost
+  gather_facts: no
+  vars:
+    account_ids:  #can get all account from master org
+      - "654747241975"
+      - "995466072301"
+    regions: # aws ec2 describe-regions can give all regions
+      - "us-east-1"
+      - "ap-sout-1"
+    output_path: "/home/ec2-user/output/"
+    account_region_pairs: []  # Initialize the variable
+    results: {}
+
+  tasks:
+    - name: Create combinations of account IDs and regions
+      set_fact:
+        account_region_pairs: "{{ account_region_pairs + [{'account_id': item.0, 'region': item.1}] }}"
+      loop: "{{ account_ids | product(regions) | list }}"
+      loop_control:
+        label: "{{ item.0 }} in {{ item.1 }}"
+      vars:
+        account_id: "{{ item.0 }}"
+        region: "{{ item.1 }}"
+
+    - name: Gather EC2 instance facts for each account and region
+      amazon.aws.ec2_instance_info:
+        region: "{{ item.region }}"
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+      loop: "{{ account_region_pairs }}"
+      register: ec2_info
+
+    - name: Calculate disk utilization and store results
+      set_fact:
+        results: >-
+          {{ results | combine({
+              item.item.region: {
+                'account_id': item.item.account_id,
+                'disk_utilization': item.instances | map(attribute='block_device_mappings') | map(attribute='0') | map(attribute='ebs') | map(attribute='volume_size') | list | first | default(0) | round(2)
+              }
+            }) }}
+      when: item.instances | length > 0
+      loop: "{{ ec2_info.results }}"
+
+    - name: Write disk utilization data to JSON file
+      copy:
+        dest: "{{ output_path }}disk_utilisation_{{ item.value.account_id }}_{{ item.key }}.json"
+        content: "{{ item.value | to_json }}"
+      loop: "{{ results | dict2items }}"
+      when: item.value is defined
